@@ -1,0 +1,115 @@
+# ==============================
+# .NET Runtime/Windows Desktop Full Uninstall Script
+# Intune Remediation version (safe registry + folder cleanup + verification)
+# ==============================
+
+$targetVersions = @("7.0")
+
+# Registry uninstall roots
+$uninstallRoots = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+)
+
+# Runtime folder paths
+$runtimeRoots = @(
+    "C:\Program Files\dotnet\shared",
+    "C:\Program Files (x86)\dotnet\shared"
+)
+
+$sharedFolders = @(
+    "Microsoft.NETCore.App",
+    "Microsoft.WindowsDesktop.App",
+    "Microsoft.AspNetCore.App"
+)
+
+# --- Registry-based uninstall ---
+foreach ($root in $uninstallRoots) {
+    if (Test-Path $root) {
+        Get-ChildItem $root | ForEach-Object {
+            try {
+                $app = Get-ItemProperty $_.PSPath -ErrorAction Stop
+
+                # Skip invalid entries without DisplayName
+                if (-not $app.PSObject.Properties.Name.Contains("DisplayName")) { return }
+
+                foreach ($ver in $targetVersions) {
+                    if ($app.DisplayName -match "Microsoft (?:\.NET|Windows Desktop) Runtime" -and
+                        $app.DisplayVersion -like "$ver.*") {
+                        
+                        if ($app.UninstallString) {
+                            Write-Output "Uninstalling $($app.DisplayName) $($app.DisplayVersion)"
+                            Start-Process -FilePath "cmd.exe" `
+                                -ArgumentList "/c $($app.UninstallString) /quiet /norestart" `
+                                -WindowStyle Hidden `
+                                -Wait `
+                                -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-Output "Skipping invalid registry entry under $root : $_"
+            }
+        }
+    }
+}
+
+# --- Folder cleanup ---
+foreach ($root in $runtimeRoots) {
+    foreach ($folder in $sharedFolders) {
+        $path = Join-Path $root $folder
+        foreach ($ver in $targetVersions) {
+            try {
+                $targetPath = Join-Path $path "$ver*"
+                if (Test-Path $targetPath) {
+                    Write-Output "Removing folder: $targetPath"
+                    Remove-Item -Path $targetPath -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+            catch {
+                Write-Output "Error removing folder $targetPath : $_"
+            }
+        }
+    }
+}
+
+# --- Verification ---
+$found = $false
+
+# Check registry again
+foreach ($root in $uninstallRoots) {
+    if (Test-Path $root) {
+        $apps = Get-ChildItem $root | ForEach-Object {
+            try { Get-ItemProperty $_.PSPath -ErrorAction Stop } catch { $null }
+        } | Where-Object { $_ -and $_.PSObject.Properties.Name.Contains("DisplayName") }
+
+        foreach ($ver in $targetVersions) {
+            if ($apps | Where-Object { $_.DisplayName -match "Microsoft (?:\.NET|Windows Desktop) Runtime" -and $_.DisplayVersion -like "$ver.*" }) {
+                $found = $true
+            }
+        }
+    }
+}
+
+# Check folders again
+foreach ($root in $runtimeRoots) {
+    foreach ($folder in $sharedFolders) {
+        $path = Join-Path $root $folder
+        foreach ($ver in $targetVersions) {
+            if (Test-Path (Join-Path $path "$ver*")) {
+                $found = $true
+            }
+        }
+    }
+}
+
+# --- Final exit code for Intune ---
+if ($found) {
+    #Write-Output ".NET $($targetVersions -join ', ') still present after remediation."
+    exit 1   # Non-compliant → Remediation failed
+}
+else {
+    #Write-Output ".NET $($targetVersions -join ', ') successfully removed."
+    exit 0   # Compliant → Remediation successful
+}
