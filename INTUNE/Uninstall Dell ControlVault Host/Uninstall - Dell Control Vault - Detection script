@@ -1,0 +1,35 @@
+# Detection Script - Dell ControlVault Host Components Target Versions
+
+$targetVersions = @("5.14.10.10", "5.14.15.22", "5.13.11.19", "5.15.10.14", "6.2.26.36")
+
+# Registry paths to check
+$regPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+)
+
+$installedApps = @()
+
+foreach ($path in $regPaths) {
+    if (Test-Path $path) {
+        Get-ChildItem $path -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+                $app = Get-ItemProperty $_.PsPath -ErrorAction Stop
+                if ($app.DisplayName -like "*Dell ControlVault Host Components*" -and
+                    $targetVersions -contains $app.DisplayVersion) {
+                    $installedApps += $app
+                }
+            } catch {
+                # Skip bad registry entries
+            }
+        }
+    }
+}
+
+if ($installedApps.Count -gt 0) {
+    Write-Host "NonCompliant"
+    exit 1
+} else {
+    Write-Host "Compliant"
+    exit 0
+}
