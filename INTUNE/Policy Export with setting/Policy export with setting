@@ -1,0 +1,340 @@
+# ============================================================
+# INTUNE FULL HUMAN-READABLE POLICY EXPORT
+# SETTINGS CATALOG + REAL VALUES + ALL PAGES
+# JSON + CSV EXPORT
+# ============================================================
+
+# ------------------------------------------------------------
+# IMPORT MODULES
+# ------------------------------------------------------------
+
+Import-Module Microsoft.Graph.Authentication
+Import-Module Microsoft.Graph.DeviceManagement
+
+# ------------------------------------------------------------
+# CONNECT TO MICROSOFT GRAPH
+# ------------------------------------------------------------
+
+Connect-MgGraph `
+-Scopes `
+"DeviceManagementConfiguration.Read.All",
+"DeviceManagementManagedDevices.Read.All" `
+-UseDeviceAuthentication `
+-NoWelcome
+
+# ------------------------------------------------------------
+# EXPORT PATH
+# ------------------------------------------------------------
+
+$ExportPath = "C:\IntuneExport"
+
+New-Item `
+-ItemType Directory `
+-Path $ExportPath `
+-Force | Out-Null
+
+# ============================================================
+# FUNCTION : HANDLE PAGINATION
+# ============================================================
+
+function Get-AllGraphResults {
+
+    param (
+        [string]$Uri
+    )
+
+    $results = @()
+
+    do {
+
+        Write-Host "Fetching: $Uri"
+
+        $response = Invoke-MgGraphRequest `
+        -Method GET `
+        -Uri $Uri
+
+        if ($response.value) {
+            $results += $response.value
+        }
+
+        $Uri = $response.'@odata.nextLink'
+
+    } while ($Uri)
+
+    return $results
+}
+
+# ============================================================
+# FUNCTION : CLEAN SETTING NAME
+# ============================================================
+
+function Convert-ReadableSettingName {
+
+    param (
+        [string]$Name
+    )
+
+    if (-not $Name) {
+        return ""
+    }
+
+    $Name = $Name `
+    -replace "user_vendor_msft_policy_config_", "" `
+    -replace "device_vendor_msft_policy_config_", "" `
+    -replace "~policy~", " > " `
+    -replace "~", " " `
+    -replace "_", " "
+
+    return $Name.Trim()
+}
+
+# ============================================================
+# FUNCTION : CONVERT VALUE TO HUMAN READABLE FORMAT
+# ============================================================
+
+function Convert-ReadableValue {
+
+    param (
+        [string]$Value
+    )
+
+    if (-not $Value) {
+        return ""
+    }
+
+    switch -Regex ($Value.ToLower()) {
+
+        "browsersignin_0$" { return "Disable browser sign-in" }
+        "browsersignin_1$" { return "Enable browser sign-in" }
+
+        "syncdisabled_0$" { return "Disabled" }
+        "syncdisabled_1$" { return "Enabled" }
+
+        "browserguestmodeenabled_0$" { return "Disabled" }
+        "browserguestmodeenabled_1$" { return "Enabled" }
+
+        "incognitomodeavailability_0$" { return "Disabled" }
+        "incognitomodeavailability_1$" { return "Enabled" }
+
+        "_0$" { return "Disabled" }
+        "_1$" { return "Enabled" }
+        "_2$" { return "Option 2" }
+
+        default { return $Value }
+    }
+}
+
+# ============================================================
+# FUNCTION : GET REAL HUMAN-READABLE SETTINGS
+# ============================================================
+
+function Get-ReadableSettings {
+
+    param (
+        $Settings,
+        $PolicyName
+    )
+
+    $output = @()
+
+    foreach ($item in $Settings) {
+
+        $instance = $item.settingInstance
+
+        if (-not $instance.settingDefinitionId) {
+            continue
+        }
+
+        # ----------------------------------------------------
+        # CLEAN SETTING NAME
+        # ----------------------------------------------------
+
+        $settingName = Convert-ReadableSettingName `
+        -Name $instance.settingDefinitionId
+
+        $value = ""
+
+        # ====================================================
+        # DIRECT SIMPLE VALUE
+        # ====================================================
+
+        if ($instance.simpleSettingValue.value) {
+
+            $value = $instance.simpleSettingValue.value
+        }
+
+        # ====================================================
+        # DIRECT CHOICE VALUE
+        # ====================================================
+
+        elseif ($instance.choiceSettingValue.value) {
+
+            $value = Convert-ReadableValue `
+            -Value $instance.choiceSettingValue.value
+        }
+
+        # ====================================================
+        # CHILD VALUES
+        # ====================================================
+
+        if ($instance.choiceSettingValue.children) {
+
+            foreach ($child in $instance.choiceSettingValue.children) {
+
+                # --------------------------------------------
+                # CHILD SIMPLE STRING VALUE
+                # --------------------------------------------
+
+                if ($child.simpleSettingValue.value) {
+
+                    $value = $child.simpleSettingValue.value
+                }
+
+                # --------------------------------------------
+                # CHILD CHOICE VALUE
+                # --------------------------------------------
+
+                elseif ($child.choiceSettingValue.value) {
+
+                    $value = Convert-ReadableValue `
+                    -Value $child.choiceSettingValue.value
+                }
+
+                # --------------------------------------------
+                # NESTED CHILDREN SUPPORT
+                # --------------------------------------------
+
+                if ($child.choiceSettingValue.children) {
+
+                    foreach ($nestedChild in $child.choiceSettingValue.children) {
+
+                        if ($nestedChild.simpleSettingValue.value) {
+
+                            $value = $nestedChild.simpleSettingValue.value
+                        }
+
+                        elseif ($nestedChild.choiceSettingValue.value) {
+
+                            $value = Convert-ReadableValue `
+                            -Value $nestedChild.choiceSettingValue.value
+                        }
+                    }
+                }
+            }
+        }
+
+        # ====================================================
+        # ADD TO OUTPUT
+        # ====================================================
+
+        $output += [PSCustomObject]@{
+
+            PolicyName = $PolicyName
+            Setting    = $settingName
+            Value      = $value
+        }
+    }
+
+    return $output
+}
+
+# ============================================================
+# FUNCTION : EXPORT SETTINGS CATALOG POLICIES
+# ============================================================
+
+function Export-SettingsCatalogPolicies {
+
+    Write-Host ""
+    Write-Host "========================================="
+    Write-Host " EXPORTING SETTINGS CATALOG POLICIES"
+    Write-Host "========================================="
+
+    $policies = Get-AllGraphResults `
+    -Uri "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies"
+
+    foreach ($policy in $policies) {
+
+        try {
+
+            $policyName = $policy.name
+
+            if (-not $policyName) {
+                $policyName = "UnknownPolicy"
+            }
+
+            $safeName = $policyName -replace '[\\/:*?"<>|]', '_'
+
+            Write-Host ""
+            Write-Host "Exporting: $policyName"
+
+            # ------------------------------------------------
+            # GET REAL SETTINGS
+            # ------------------------------------------------
+
+            $settings = Get-AllGraphResults `
+            -Uri "https://graph.microsoft.com/beta/deviceManagement/configurationPolicies/$($policy.id)/settings"
+
+            # ------------------------------------------------
+            # CONVERT TO HUMAN READABLE FORMAT
+            # ------------------------------------------------
+
+            $readableSettings = Get-ReadableSettings `
+            -Settings $settings `
+            -PolicyName $policyName
+
+            # ------------------------------------------------
+            # JSON EXPORT
+            # ------------------------------------------------
+
+            $jsonExport = [PSCustomObject]@{
+
+                PolicyName   = $policy.name
+                PolicyId     = $policy.id
+                Description  = $policy.description
+                Platforms    = $policy.platforms
+                LastModified = $policy.lastModifiedDateTime
+                Settings     = $readableSettings
+            }
+
+            $jsonExport | ConvertTo-Json -Depth 50 | Out-File `
+            "$ExportPath\$safeName.json"
+
+            # ------------------------------------------------
+            # CSV EXPORT
+            # ------------------------------------------------
+
+            $readableSettings | Export-Csv `
+            "$ExportPath\$safeName.csv" `
+            -NoTypeInformation `
+            -Encoding UTF8
+
+            Write-Host "SUCCESS: $policyName"
+
+        }
+        catch {
+
+            Write-Host ""
+            Write-Host "FAILED: $policyName"
+            Write-Host $_.Exception.Message
+        }
+    }
+}
+
+# ============================================================
+# RUN EXPORT
+# ============================================================
+
+Export-SettingsCatalogPolicies
+
+# ============================================================
+# COMPLETE
+# ============================================================
+
+Write-Host ""
+Write-Host "========================================="
+Write-Host " ALL POLICIES EXPORTED SUCCESSFULLY"
+Write-Host "========================================="
+
+Write-Host ""
+Write-Host "EXPORT LOCATION:"
+Write-Host $ExportPath
